@@ -46,8 +46,14 @@ struct OrderSide : public MapType<direction>::value_type {
   inline void handle(const OrderAction<Action::Remove, direction> &oaction);
   inline void handle(const OrderAction<Action::Modify, direction> &oaction);
 
-  value_type const &front() const { return *MapT::begin(); }
-  value_type &front() { return *MapT::begin(); }
+  value_type const &front() const {
+    assert(!MapT::empty());
+    return *MapT::begin();
+  }
+  value_type &front() {
+    assert(!MapT::empty());
+    return *MapT::begin();
+  }
 };
 
 struct OrderBook {
@@ -82,6 +88,8 @@ template <Direction direction>
 void OrderSide<direction>::handle(
     const OrderAction<Action::Add, direction> &oaction) {
   auto &vct = MapT::operator[](oaction.getPrice());
+  // we don't assume that order ids only go up
+  // otherwise a binary search would have been better
   auto iter =
       std::find_if(vct.begin(), vct.end(), [&oaction](const Order &order) {
         return order.getOid() == oaction.getOid();
@@ -190,21 +198,20 @@ void OrderBook::match(FillsCallback &cb) noexcept {
            buySide.front().first >= sellSide.front().first;
   };
 
-  while (isCrossed(m_buySide, m_sellSide)) {
-
-    auto reduceSize = [](auto &side, auto volume) {
-      auto &orders = side.front().second;
-      if (volume == orders.front().getVolume()) {
-        if (1u == orders.size()) {
-          side.erase(side.begin());
-        } else {
-          orders.erase(orders.begin());
-        }
+  auto reduceSize = [](auto &side, auto volume) {
+    auto &orders = side.front().second;
+    if (volume == orders.front().getVolume()) {
+      if (1u == orders.size()) {
+        side.erase(side.begin());
       } else {
-        orders.front().reduceVolume(volume);
+        orders.erase(orders.begin());
       }
+    } else {
+      orders.front().reduceVolume(volume);
+    }
+  };
 
-    };
+  while (isCrossed(m_buySide, m_sellSide)) {
 
     auto &buyOrders = m_buySide.front().second;
     auto &sellOrders = m_sellSide.front().second;
