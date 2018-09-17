@@ -1,6 +1,7 @@
 #ifndef PROCESSOR_H
 #define PROCESSOR_H
 
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -13,17 +14,20 @@
 namespace mvs {
 namespace orderbook {
 
-class splitter : public std::string {};
+namespace details {
 
-// we can parse absolutely anything .. as long as it's an unsigned integral
-// value
+// C-style tokenizing using strtok is just faster than out of the box C++
+// solutions. So, we do that here .. but still wrap it up in C++ exceptions, and
+// make it look pretty by using templates.
+
 template <typename T>
 typename std::enable_if<
     std::is_unsigned<T>::value && std::is_integral<T>::value, T>::type
-parse(const std::string &input) {
+parse(const char *input) {
   T output(0);
-  for (char c : input) {
-    if (c == ' ' || c == '\r') {
+  while (input) {
+    const char c = *(input++);
+    if (c == ' ' || c == '\r' || c == '\0') {
       return output;
     } else if (unlikely(c < '0' || c > '9')) {
       throw ParseError("invalid number");
@@ -35,10 +39,28 @@ parse(const std::string &input) {
   return output;
 }
 
-std::istream &operator>>(std::istream &is, splitter &output) {
-  std::getline(is, output, ',');
-  return is;
+template <typename T>
+typename std::enable_if<
+    std::is_unsigned<T>::value && std::is_integral<T>::value, T>::type
+tokenize() {
+  char *token = strtok(nullptr, ",/");
+  if (nullptr == token) {
+    throw ParseError();
+  }
+  return parse<T>(token);
 }
+
+template <typename T>
+typename std::enable_if<std::is_enum<T>::value, T>::type
+tokenize(char *ptr = nullptr) {
+  char *token = strtok(ptr, ",/");
+  if (nullptr == token) {
+    throw ParseError();
+  }
+  return static_cast<T>(*token);
+}
+
+} // namespace tokenizer
 
 template <typename BookT = OrderBook> struct Processor {
   using SelfT = Processor<BookT>;
@@ -79,51 +101,47 @@ void Processor<BookT>::process(const uint32_t oid, const Direction dir,
 
 template <typename BookT>
 template <typename FillsCallback>
-void Processor<BookT>::process(const std::string &ln, FillsCallback &cb) {
-  // strip out any comments
-  const auto comments = ln.find("//");
-  const auto line =
-      (comments != std::string::npos) ? ln.substr(0, comments) : ln;
+void Processor<BookT>::process(const std::string &line, FillsCallback &cb) {
 
-  // tokenize
-  std::istringstream iss(line);
-  const std::vector<std::string> results((std::istream_iterator<splitter>(iss)),
-                                         std::istream_iterator<splitter>());
-  if (unlikely(4 > results.size())) {
+  // we don't want to remember to free whatever we strdup - so have unique_ptr
+  // do this for us
+  std::unique_ptr<char, decltype(std::free) *> input{strdup(line.c_str()),
+                                                     std::free};
+
+  if (!input) {
     throw ParseError(line);
   }
 
-  // the first character should match our known 'actions'
-  // add and modify look the same, remove is different
-  Action action = (Action)results[0][0];
-  switch (action) {
-  case Action::Add:
-  case Action::Modify: {
-    if (unlikely(5 != results.size())) {
+  try {
+    const Action action = details::tokenize<Action>(input.get());
+    switch (action) {
+    case Action::Add:
+    case Action::Modify: {
+      const uint32_t oid = details::tokenize<uint32_t>();
+      const Direction dir = details::tokenize<Direction>();
+      const uint32_t volume = details::tokenize<uint32_t>();
+      const uint32_t price = details::tokenize<uint32_t>();
+
+      if (Action::Add == action) {
+        process<Action::Add, FillsCallback>(oid, dir, volume, price, cb);
+      } else if (Action::Modify == action) {
+        process<Action::Modify, FillsCallback>(oid, dir, volume, price, cb);
+      }
+    } break;
+
+    case Action::Remove: {
+      const uint32_t oid = details::tokenize<uint32_t>();
+      const Direction dir = details::tokenize<Direction>();
+      const uint32_t price = details::tokenize<uint32_t>();
+
+      process<Action::Remove, FillsCallback>(oid, dir, 0, price, cb);
+    } break;
+
+    default:
       throw ParseError(line);
-    }
-    const uint32_t oid = parse<uint32_t>(results[1]);
-    const Direction dir = (Direction)results[2][0];
-    const uint32_t volume = parse<uint32_t>(results[3]);
-    const uint32_t price = parse<uint32_t>(results[4]);
-    if (Action::Add == action) {
-      process<Action::Add, FillsCallback>(oid, dir, volume, price, cb);
-    } else if (Action::Modify == action) {
-      process<Action::Modify, FillsCallback>(oid, dir, volume, price, cb);
-    }
-  } break;
-  case Action::Remove: {
-    if (unlikely(4 != results.size())) {
-      throw ParseError(line);
-    }
-    const uint32_t oid = parse<uint32_t>(results[1]);
-    const Direction dir = (Direction)results[2][0];
-    const uint32_t price = parse<uint32_t>(results[3]);
-    // volume is not supplied and not needed - set it to 0
-    process<Action::Remove, FillsCallback>(oid, dir, 0, price, cb);
-  } break;
-  default:
-    throw ParseError("action mismatch");
+    };
+  } catch (ParseError e) {
+    throw ParseError(0 == strlen(e.what()) ? line : e.what());
   }
 }
 

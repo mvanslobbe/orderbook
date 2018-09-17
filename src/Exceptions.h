@@ -19,9 +19,11 @@ struct UnknownOrderIdError : std::runtime_error {
 };
 
 struct ParseError : std::runtime_error {
+  ParseError() : std::runtime_error("") {}
+
   ParseError(const std::string &line)
-      : std::runtime_error(
-            (boost::format("parse error: '%1%'") % line).str()){};
+      : std::runtime_error((boost::format("parse error: '%1%'") % line).str()) {
+  }
 };
 
 } // namespace orderbook
